@@ -8,13 +8,13 @@ Machine-readable twin: `plan.json` (same content, plus the ordered backlog). Lin
 
 | Goal | Pass condition | Proof |
 |---|---|---|
-| MFU > 40% on RTX 5090 | `mfu-dense-1b` (~1.1B dense, seq 2048, vocab 32768, bf16) min MFU over 3 independent Vast hosts > 40%, 1x and 8x GPU, determinism ON | `run_mfu.py` JSON with raw step timings, FLOPs/token `6*N_active + 12*L*d*T`, peak 209.5 TFLOPS (ASSUMED vendor) and measured GEMM peak, replay leaf-root match; recomputed by `check_gpu_evidence.py --kind mfu` |
+| MFU > 40% on RTX 5090 | `mfu-dense-1b` (~1.1B dense, seq 2048, vocab 32768, bf16) min MFU over 3 independent Vast hosts > 40%, 1x and 8x GPU, determinism ON | `run_mfu.py` JSON with raw step timings, FLOPs/token `6*N_active + 12*L*d*T`, peak 209.5 TFLOPS per GPU x n_gpus (ASSUMED vendor) and measured GEMM peak, replay leaf-root match; recomputed by `check_gpu_evidence.py --kind mfu` |
 | Maximum lossless update compression | v2 container output within 5% of the summed per-stream empirical entropy bound; >= 4x smaller than v1 sparseloco on real deltas; `ef_out` bitwise identical to v1 | entropy-bound JSON on real Phase-B/1B deltas + `test_codec_v2.py` |
 | Complete network | 3 regional CPU aggregators agree 2-of-3 on every round; join/leave mid-run with verified state sync; k-of-n auditor quorum; registry trains every listed family | 20-round live run journal (WS6.6) + per-family CPU bitwise tests and 5090 smoke JSON |
 
 Baseline today: 0.16% MFU (Phase B h1, deterministic, DERIVED in audit 4.1). The jump to 40% depends on WS1 items 1.1-1.11 together; no single item gets there.
 
-## Owner decisions (must be answered before rentals or protocol changes)
+## Owner decisions (APPROVED 2026-10-12, see decisions.md: D1 USD 200 per run, D2 deps, D3 Vast CPU, D4 additive versioning)
 
 - **D1 Total GPU/CPU rental budget.** Sum of workstream ceilings is USD 440. Last recorded Vast credit was USD 20.95 (docs/RESULTS.md section 7, read 2026-10-08). Every rental task is blocked until the owner tops up or lowers scope; the harness refuses to start a rental whose worst case exceeds max_usd or credit-5 (scripts/vast_e2e.py:214-258). Default if declined: none - spend is owner-only.
 - **D2 New dependencies.** zstandard (codec back-end), hypothesis (dev tests), h2 (httpx HTTP/2), flash-attn (only if 1.1 spike selects backend b). Each is pinned in pyproject.toml/uv.lock or docker/gpu-requirements.*. Default if declined: if refused: stdlib lzma back-end (2.4), stdlib random-based property tests, HTTP/1.1, SDPA or Triton attention.
@@ -137,7 +137,7 @@ Exit evidence: final-*.json: min MFU > 40% on 3 hosts for 1x and 8x 5090, replay
 
 - Files: `src/hypertrain/trainer/determinism.py:51-58`, `src/hypertrain/gpu_ops/network_qualification.py`, `tests/trainer/test_determinism_policy.py (new)`
 - Changes:
-  - Introduce precision_policy in reference_spec.env: 'strict' (current) and 'pinned-tc' (bf16 matmul inputs with fp32 accumulate; allow_bf16_reduced_precision_reduction stays False; CUBLASLT workspace pinned; cuBLAS split-K disabled via CUBLAS_WORKSPACE_CONFIG and torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False).
+  - Introduce precision_policy in reference_spec.env: 'strict' (current flags) and 'pinned-tc' (TF32 allowed for fp32 matmuls, bf16 inputs with fp32 accumulate; allow_bf16_reduced_precision_reduction and allow_fp16_reduced_precision_reduction stay False; CUBLAS_WORKSPACE_CONFIG pinned so split-K choice is fixed; cuBLASLt heuristics cache disabled).
   - Policy name signed into run_id via protocol messages_v2 reference_spec (schema bump, both docs/schemas updated).
   - Qualification (network_qualification.py) records policy and rejects mixed-policy rounds.
 - Tests:
@@ -214,7 +214,7 @@ Exit evidence: final-*.json: min MFU > 40% on 3 hosts for 1x and 8x 5090, replay
 
 - Files: `src/hypertrain/trainer/compress.py:37-44`, `src/hypertrain/trainer/gpu_hash.py (new)`, `src/hypertrain/protocol/hashing.py`, `tests/trainer/test_gpu_hash.py (new)`
 - Changes:
-  - Define ht-leaf-v2: fixed 1 MiB chunk tree hash; chunk digests computed on device by a deterministic integer kernel (e.g. 64-bit lane-wise multiply-xor folded in fixed order), final tree combined on host with sha256 over chunk digests. Protocol version bump; v1 kept for old runs.
+  - Define ht-leaf-v2: fixed 1 MiB chunk tree hash; chunk digests are SHA-256 (or BLAKE3 if D2-approved) computed by a GPU kernel validated against hashlib known-answer vectors, or on host from pinned async D2H copies overlapped with compute; root = sha256 over ordered chunk digests. A non-cryptographic digest is forbidden (commitments must stay collision-resistant). Protocol version bump; v1 kept for old runs.
   - Checkpoint writes moved to a background thread with bounded queue; leaf commit waits only on digest.
 - Tests:
   - test_gpu_hash.py: CPU reference implementation equals device implementation on CUDA (gated); known-answer vectors; v1 path unchanged.
@@ -314,13 +314,13 @@ Exit evidence: ef_out bitwise identical v1 vs v2; sparseloco-v2 >= 4x smaller th
 - Files: `src/hypertrain/trainer/codec_v2.py (new)`, `src/hypertrain/trainer/compress.py:1-30,160-285`, `src/hypertrain/trainer/config.py:15`, `src/hypertrain/protocol/messages.py:169-175`, `docs/schemas/DeltaManifest.json`, `docs/protocol.md`
 - Changes:
   - New MAGIC values 'sparseloco-v2' and 'dense-int8-v2'; payload = header + per-tensor frames; each frame holds separate streams (indices, codes, values, scales) each with stage id + length.
-  - compress() reuses _int8_encode/_sparse_encode unchanged to produce the lossy result (ef_out bitwise identical to v1), then encodes streams losslessly.
+  - v2 is a lossless transform of the exact v1 payload: compress() still produces the v1 bytes (ef_out bitwise identical by construction) and encode_v2(v1) splits them into streams; decode_v2(v2) must return the identical v1 bytes, which then pass the existing v1 validation.
   - Validation decodes, re-encodes, and rejects if bytes differ (canonical-encoding check) before any tensor allocation beyond declared sizes; per-frame streaming decode (no b''.join of the whole payload).
 - Tests:
   - tests/trainer/test_codec_v2.py (new): ef_out v1==v2 bitwise; round-trip; non-canonical encodings rejected; truncated/oversized frames rejected; declared-size bomb rejected before allocation.
 - Evidence: pytest log
 - Rental: none (local CPU); cost USD 0
-- Depends on: 2.1
+- Depends on: none (2.1 real-delta corpus gates only the ratio claims in 2.8)
 
 #### 2.3 Elias-Fano index stage
 
@@ -486,7 +486,7 @@ Exit evidence: T3 passes; 1B-element norm < 3 s; roster at profile cap works.
 
 - Files: `src/hypertrain/aggregator/core.py:104-117`, `docs/protocol.md`, `tests/aggregator/test_norms.py (new)`
 - Changes:
-  - Spec: per tensor, float64 square/product, sum over fixed 4096-element blocks with np.add.reduce on contiguous blocks (pairwise within block is fixed by numpy for fixed length; pin numpy major in protocol), then math.fsum over block sums in tensor-name order. Document as ht-norm-v2; v1 retained for old runs.
+  - Spec ht-norm-v2: per tensor, float32 values squared (or multiplied) in float64 (exact), zero-padded to a power of two, then reduced by a fixed pairwise tree of elementwise adds (x = x[0::2] + x[1::2] until length 1). Elementwise IEEE adds are correctly rounded, so the result is bitwise independent of numpy SIMD dispatch and thread count (np.sum/np.add.reduce are NOT used because their internal blocking is build-dependent). Tensor results combined with math.fsum in tensor-name order. v1 retained for old runs.
 - Tests:
   - test_norms.py: equals math.fsum reference within 1 ulp-of-total bound and is bitwise stable across 3 runs and across numpy thread settings; 1B-element timing < 3 s on CPU node.
 - Evidence: Timing JSON on CPU node; pytest log
@@ -1051,7 +1051,7 @@ Ordered backlog (topological; ties broken by workstream priority WS0, WS4, WS1, 
   Commit: one atomic commit `ws2: Entropy-bound analyser and real-delta corpus`.
 - [ ] 24. [WS2 2.2] Codec v2 container: framing and canonical form
   Recommended task executor category: deep-high
-  Depends on: 23. Rental: none (local CPU). Cost: USD 0.
+  Depends on: none. Rental: none (local CPU). Cost: USD 0.
   Acceptance: pytest log.
   QA: run the tests listed in 2.2, then `scripts/check.sh`; failure case: the listed rejection tests must fail before the change where they lock a bug.
   Commit: one atomic commit `ws2: Codec v2 container: framing and canonical form`.
@@ -1340,3 +1340,11 @@ Ordered backlog (topological; ties broken by workstream priority WS0, WS4, WS1, 
 - No reduced-scope substitute for any target (no 'MFU on a toy shape', no lossy change sold as lossless).
 - No nondeterministic kernel, NCCL reduction op on verified tensors, or autotuning in qualified runs.
 - No credentials in logs, evidence or git; no merge, deploy or push to main.
+
+## Review amendments (review.json)
+
+- A1 1.8 cryptographic chunk digests
+- A2 4.2 SIMD-independent pairwise tree
+- A3 2.2 no GPU dependency; v2 = lossless transform of v1 bytes
+- A4 1.2 precision policy clarified
+- A5 MFU denominator n_gpus x peak
