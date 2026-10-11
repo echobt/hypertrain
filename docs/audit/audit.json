@@ -1,0 +1,439 @@
+{
+ "schema": "hypertrain-audit/v1",
+ "repo": "CortexLM/hypertrain",
+ "commit": "8baf7c8",
+ "date": "2026-10-11",
+ "sections": [
+  "missing",
+  "improvements",
+  "tests",
+  "mfu",
+  "compression_connection",
+  "complete_network"
+ ],
+ "findings": [
+  {
+   "id": "MFU-1",
+   "area": "mfu",
+   "severity": "high",
+   "title": "Decoder attention is hand-written fp32-score math; no fused/flash kernel",
+   "refs": [
+    "src/hypertrain/trainer/model.py:174-176",
+    "src/hypertrain/trainer/model.py:171-173"
+   ],
+   "recommendation": "Fused deterministic FlashAttention (deterministic backward) or batch-invariant Triton kernel",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "MFU-2",
+   "area": "mfu",
+   "severity": "high",
+   "title": "TF32 and reduced-precision reductions disabled globally",
+   "refs": [
+    "src/hypertrain/trainer/determinism.py:51-58"
+   ],
+   "recommendation": "Pin kernels/tiles for determinism instead of forcing highest precision",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "MFU-3",
+   "area": "mfu",
+   "severity": "high",
+   "title": "Gradient sync is per-tensor all_gather plus serial sum, no overlap with backward",
+   "refs": [
+    "src/hypertrain/trainer/island.py:524-543"
+   ],
+   "recommendation": "Fixed-order bucketed reduce-scatter overlapped with backward",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "MFU-4",
+   "area": "mfu",
+   "severity": "medium",
+   "title": "Per-step host syncs and Python per-tensor optimizer loop",
+   "refs": [
+    "src/hypertrain/trainer/island.py:520",
+    "src/hypertrain/trainer/optim.py:115-119",
+    "src/hypertrain/trainer/optim.py:138-153",
+    "src/hypertrain/trainer/model.py:215"
+   ],
+   "recommendation": "On-device accumulation, fused foreach optimizer",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "MFU-5",
+   "area": "mfu",
+   "severity": "medium",
+   "title": "MoE computes dropped tokens, Python expert loop, bf16 all_to_all upcast to fp32",
+   "refs": [
+    "src/hypertrain/trainer/model.py:212-219",
+    "src/hypertrain/trainer/island.py:175-176"
+   ],
+   "recommendation": "Grouped GEMM, skip dropped tokens, bf16 transfer",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "MFU-6",
+   "area": "mfu",
+   "severity": "medium",
+   "title": "Synchronous data loading without pinned memory or prefetch",
+   "refs": [
+    "src/hypertrain/trainer/loop.py:108-123"
+   ],
+   "recommendation": "Double-buffered pinned prefetcher",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "MFU-BASE",
+   "area": "mfu",
+   "severity": "info",
+   "title": "Phase B deterministic MFU about 0.16% (h1), 0.09% (h0); baseline 0.34%",
+   "refs": [
+    "experiments/results/phase_b_summary.json:24-43"
+   ],
+   "recommendation": "Add FLOPs/token and MFU to GPU experiment outputs",
+   "lineage": "DERIVED"
+  },
+  {
+   "id": "CMP-1",
+   "area": "compression",
+   "severity": "high",
+   "title": "No entropy coding of update payloads; sparse indices raw u32",
+   "refs": [
+    "src/hypertrain/trainer/compress.py:119-124",
+    "src/hypertrain/trainer/compress.py:170-177"
+   ],
+   "recommendation": "Codec v2: gap/Elias-Fano indices, rANS/zstd for codes, shuffled scales; measured 4.49x lossless on sparse payload",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "CMP-2",
+   "area": "compression",
+   "severity": "high",
+   "title": "64 KiB delta cap on service and capacity validation paths",
+   "refs": [
+    "src/hypertrain/trainer/compress.py:265",
+    "src/hypertrain/challenge/store.py:7454",
+    "src/hypertrain/challenge/store.py:7463",
+    "src/hypertrain/aggregator/capacity_worker.py:436"
+   ],
+   "recommendation": "Use profile.max_object_bytes as at store.py:5921-5925",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "NET-1",
+   "area": "network",
+   "severity": "medium",
+   "title": "Sequential chunk upload, no resume from acks, no retry",
+   "refs": [
+    "src/hypertrain/relay/client.py:159-166"
+   ],
+   "recommendation": "Parallel chunks, resume via /acks, backoff, HTTP/2, fallback relays",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "NET-2",
+   "area": "network",
+   "severity": "medium",
+   "title": "Relay re-assembles whole object from chunks (2x storage/egress)",
+   "refs": [
+    "src/hypertrain/relay/core.py:401-404"
+   ],
+   "recommendation": "Store chunks plus signed manifest; stream to consumers",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "NET-3",
+   "area": "network",
+   "severity": "medium",
+   "title": "Fixed 90 s receive deadline regardless of size",
+   "refs": [
+    "src/hypertrain/data/stream_store.py:48"
+   ],
+   "recommendation": "Size-scaled deadline",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "NET-4",
+   "area": "network",
+   "severity": "low",
+   "title": "R2 single PUT only, 5 GiB cap",
+   "refs": [
+    "src/hypertrain/storage/r2.py:137-145"
+   ],
+   "recommendation": "S3 multipart",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "AGG-1",
+   "area": "aggregator",
+   "severity": "high",
+   "title": "sqnorm/dot convert every coordinate to Python float",
+   "refs": [
+    "src/hypertrain/aggregator/core.py:104-117",
+    "src/hypertrain/aggregator/core.py:244-249"
+   ],
+   "recommendation": "Vectorised fixed-order deterministic reduction",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "TRUST-1",
+   "area": "security",
+   "severity": "high",
+   "title": "Miner self-reported rerun yields TRANSIENT forgiveness",
+   "refs": [
+    "src/hypertrain/auditor/replay.py:857-858"
+   ],
+   "recommendation": "Referee-confirmed transient classification",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "TRUST-2",
+   "area": "security",
+   "severity": "medium",
+   "title": "Audit impossible when anchor age > 1",
+   "refs": [
+    "src/hypertrain/auditor/replay.py:394-395"
+   ],
+   "recommendation": "Chain replay or checkpoint anchors",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "SEC-1",
+   "area": "security",
+   "severity": "high",
+   "title": "Unbounded public API cache keyed by request path",
+   "refs": [
+    "src/hypertrain/public_api/__init__.py:49",
+    "src/hypertrain/public_api/__init__.py:66"
+   ],
+   "recommendation": "LRU or route allowlist",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "SEC-2",
+   "area": "security",
+   "severity": "low",
+   "title": "Envelope expiry effectively infinite",
+   "refs": [
+    "src/hypertrain/miner/core.py:51"
+   ],
+   "recommendation": "Bounded expiry",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "BUG-1",
+   "area": "beacon",
+   "severity": "medium",
+   "title": "drand latest() maps non-int round to 0, get(0) raises ValueError not BeaconError",
+   "refs": [
+    "src/hypertrain/beacon/drand.py:164-167",
+    "src/hypertrain/beacon/drand.py:155"
+   ],
+   "recommendation": "Raise BeaconError",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "BUG-2",
+   "area": "ledger",
+   "severity": "low",
+   "title": "Escrow remainder always to lexicographically first hotkeys",
+   "refs": [
+    "src/hypertrain/ledger/escrow_v2.py:449-454"
+   ],
+   "recommendation": "Beacon-rotated order; explicit total==0 guard",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "BUG-3",
+   "area": "challenge",
+   "severity": "low",
+   "title": "assert used as production guard",
+   "refs": [
+    "src/hypertrain/challenge/store.py:4380"
+   ],
+   "recommendation": "Explicit raise",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "SCALE-1",
+   "area": "challenge",
+   "severity": "medium",
+   "title": "Roster capped at 16/32",
+   "refs": [
+    "src/hypertrain/challenge/store.py:4384-4393"
+   ],
+   "recommendation": "Qualify larger profiles; elastic membership",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "SCALE-2",
+   "area": "challenge",
+   "severity": "medium",
+   "title": "Single SQLite connection and global lock",
+   "refs": [
+    "src/hypertrain/challenge/store.py:364-370"
+   ],
+   "recommendation": "Replicated store; split store.py",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "MODEL-1",
+   "area": "models",
+   "severity": "high",
+   "title": "Only decoder and OpenDecision encoder; non-decoder arch routed to OD",
+   "refs": [
+    "src/hypertrain/trainer/config.py:35",
+    "src/hypertrain/trainer/model.py:24-28"
+   ],
+   "recommendation": "Architecture registry and model zoo",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "MODEL-2",
+   "area": "models",
+   "severity": "high",
+   "title": "Causal CE only, fixed u32[seq_len+1] samples",
+   "refs": [
+    "src/hypertrain/trainer/model.py:271-273",
+    "src/hypertrain/trainer/loop.py:117-119"
+   ],
+   "recommendation": "Loss masks, variable records, multimodal sidecars",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "DATA-1",
+   "area": "data",
+   "severity": "high",
+   "title": "Production shards u16; vocab capped below 65535",
+   "refs": [
+    "src/hypertrain/datasets/build.py:103-104"
+   ],
+   "recommendation": "dtype-parameterised shard format",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "DATA-2",
+   "area": "data",
+   "severity": "medium",
+   "title": "No document-boundary masking in packing",
+   "refs": [
+    "src/hypertrain/data/shards.py:57"
+   ],
+   "recommendation": "Segment ids sidecar",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "DATA-3",
+   "area": "data",
+   "severity": "medium",
+   "title": "tulu-3-sft adapter raises; od-c sources lack adapters",
+   "refs": [
+    "src/hypertrain/teacher/adapters.py:78-92"
+   ],
+   "recommendation": "Implement or remove from mixes",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "DOC-1",
+   "area": "docs",
+   "severity": "medium",
+   "title": "Bandwidth figures 10x too high (8 and 0.31 Gbit/s by stated formula)",
+   "refs": [
+    "docs/parity.md:33"
+   ],
+   "recommendation": "Correct numbers",
+   "lineage": "DERIVED"
+  },
+  {
+   "id": "DOC-2",
+   "area": "docs",
+   "severity": "low",
+   "title": "Operator guide says Phase B pins reset; profile pins carry",
+   "refs": [
+    "docs/operator.md:151",
+    "experiments/gpu_phase_b/phase_b.json:35"
+   ],
+   "recommendation": "Correct doc",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "DOC-3",
+   "area": "docs",
+   "severity": "low",
+   "title": "parity.md cites untracked summary_smoke.json",
+   "refs": [
+    "docs/parity.md:83-86"
+   ],
+   "recommendation": "Commit file or retag",
+   "lineage": "MEASURED"
+  },
+  {
+   "id": "TEST-1",
+   "area": "tests",
+   "severity": "medium",
+   "title": "Genuine CUDA tests and gitleaks test always skip in CI",
+   "refs": [
+    "tests/challenge/test_backend_authority_v2.py:132",
+    "tests/miner/test_island_launch_v2.py:807",
+    "tests/test_publish_exclusions.py:25"
+   ],
+   "recommendation": "GPU CI gate; install gitleaks",
+   "lineage": "MEASURED"
+  }
+ ],
+ "measurements": {
+  "lossless_headroom": {
+   "source": "research/verify_lossless.py",
+   "log": "logs/verify_lossless.log",
+   "input": "ASSUMED student-t df=3 proxy, 4194304 params, topk 3.125%",
+   "sparseloco": {
+    "raw": 557284,
+    "zstd19": 198639,
+    "gap_shuffle_zstd19": 124152,
+    "ratio": 4.49
+   },
+   "dense_int8": {
+    "raw": 4260024,
+    "gap_shuffle_zstd19": 3411796,
+    "ratio": 1.25
+   }
+  },
+  "mfu": {
+   "source": "research/verify-mfu.json",
+   "peak_assumed_tflops": 209.5,
+   "phase_b_h1_det": 0.0016,
+   "phase_b_h0_det": 0.0009,
+   "phase_b_h1_base": 0.0034,
+   "phase_a_det": 0.053
+  }
+ },
+ "tests_to_add": [
+  "T1 hypothesis codec fuzz",
+  "T2 JCS/envelope fuzz",
+  "T3 real-size payload path",
+  "T4 cross-hardware determinism matrix",
+  "T5 MFU regression gate",
+  "T6 adversarial e2e",
+  "T7 chaos/netem",
+  "T8 load/soak",
+  "T9 economics invariants",
+  "T10 mutation testing",
+  "T11 supply chain",
+  "T12 doc numbers in CI",
+  "T13 direct unit tests gpu_ops budget/verdict, island_worker",
+  "T14 TOST parity >=8 seeds"
+ ],
+ "roadmap_priority": [
+  "CMP-2",
+  "AGG-1",
+  "MFU-1",
+  "MFU-3",
+  "MFU-2",
+  "CMP-1",
+  "TRUST-1",
+  "SEC-1",
+  "DATA-1",
+  "MODEL-1"
+ ]
+}
